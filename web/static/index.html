@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DeepSeek Agent Evaluation Lab</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 2rem auto; max-width: 1100px; color: #222; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 14px; }
+  th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  th { background: #f5f5f5; }
+  .err { color: #b00020; }
+  .ok { color: #0a7d2c; }
+  #chartWrap { max-width: 800px; }
+  pre { background: #f6f8fa; padding: 1rem; overflow-x: auto; font-size: 13px; }
+  .trace-msg { border-left: 3px solid #ccc; margin: .5rem 0; padding-left: .8rem; }
+  .trace-msg .role { font-weight: 600; text-transform: uppercase; font-size: 11px; color: #666; }
+  #header { display: flex; justify-content: space-between; align-items: center; }
+  #langSwitch button { border: 1px solid #ccc; background: #fff; padding: 4px 12px; cursor: pointer; }
+  #langSwitch button.active { background: #222; color: #fff; }
+  #live { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #666; margin-right: 12px; }
+  #liveDot { width: 9px; height: 9px; border-radius: 50%; background: #0a7d2c; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+  #headerRight { display: flex; align-items: center; }
+  #verdict { background: #f0f6ff; border: 1px solid #c8d8f0; border-radius: 6px; padding: 1rem 1.2rem; margin: 1.2rem 0; }
+  #verdict ul { margin: .5rem 0 0; padding-left: 1.2rem; }
+</style>
+</head>
+<body>
+<div id="header">
+  <h1 id="title"></h1>
+  <div id="headerRight">
+    <div id="live"><span id="liveDot"></span><span id="liveText"></span></div>
+    <div id="langSwitch">
+      <button id="btnEn" onclick="setLang('en')">EN</button><button id="btnRu" onclick="setLang('ru')">RU</button>
+    </div>
+  </div>
+</div>
+<label><span id="expLabel"></span>: <select id="expSelect"></select></label>
+<div id="verdict"></div>
+<div id="summary"></div>
+<div id="chartWrap"><canvas id="chart"></canvas></div>
+<h2 id="runsHeading"></h2>
+<div id="runs"></div>
+<h2 id="traceHeading"></h2>
+<div id="trace"></div>
+
+<script>
+const I18N = {
+  en: {
+    title: "DeepSeek Agent Evaluation Lab",
+    experiment: "Experiment",
+    runsHeading: "Runs",
+    traceHeading: "Trace",
+    selectRun: "Select a run to inspect its message trace.",
+    verdictHeading: "Verdict",
+    noData: "No data yet.",
+    th: { config: "config", runs: "runs", solved: "solved", solveRate: "solve rate", costSolved: "$/solved", p50: "p50 ms", p95: "p95 ms", cacheHit: "cache hit", attempts: "attempts", toolErr: "tool err", run: "run", task: "task", rep: "rep", status: "status", cost: "$", promptTok: "prompt tok", cacheTok: "cache hit tok" },
+    status: { solved: "solved", fail: "fail", err: "ERR" },
+    chart: { cost: "$ per solved task", cache: "cache hit rate" },
+    vTotal: (runs, solved, cost) => `${runs} runs in total, ${solved} solved, total spend $${cost}.`,
+    vBest: (name, cost, rate) => `Best value: "${name}" at $${cost} per solved task (solve rate ${rate}).`,
+    vNone: "No configuration solved a single task — cost per solved task is undefined.",
+    vCache: (name, rate) => `Highest context cache hit rate: "${name}" at ${rate}.`,
+    vInfra: n => `${n} run(s) ended with an infrastructure error and were excluded from the solve rate.`,
+    vCiOverlap: "Solve-rate confidence intervals overlap across configs — more repeats are needed before calling a quality winner.",
+    vCiClear: (name) => `"${name}" has a solve-rate CI disjoint from the others — the quality difference is statistically supported.`,
+    expOption: (id, name, n) => `#${id} ${name} (${n} runs)`,
+    live: "Live",
+    updated: t => `updated ${t}`,
+  },
+  ru: {
+    title: "DeepSeek Agent Evaluation Lab",
+    experiment: "Эксперимент",
+    runsHeading: "Прогоны",
+    traceHeading: "Трассировка",
+    selectRun: "Выберите прогон, чтобы посмотреть трассировку сообщений.",
+    verdictHeading: "Итог",
+    noData: "Данных пока нет.",
+    th: { config: "конфиг", runs: "прогонов", solved: "решено", solveRate: "решённость", costSolved: "$/решённую", p50: "p50 мс", p95: "p95 мс", cacheHit: "кеш-хит", attempts: "попыток", toolErr: "ошибок инстр.", run: "прогон", task: "задача", rep: "повт.", status: "статус", cost: "$", promptTok: "токенов промпта", cacheTok: "токенов кеш-хит" },
+    status: { solved: "решено", fail: "не решено", err: "ОШИБКА" },
+    chart: { cost: "$ за решённую задачу", cache: "доля cache hit" },
+    vTotal: (runs, solved, cost) => `Всего прогонов: ${runs}, решено: ${solved}, потрачено $${cost}.`,
+    vBest: (name, cost, rate) => `Лучшая цена: «${name}» — $${cost} за решённую задачу (решённость ${rate}).`,
+    vNone: "Ни одна конфигурация не решила ни одной задачи — стоимость решённой задачи не определена.",
+    vCache: (name, rate) => `Максимальная доля cache hit: «${name}» — ${rate}.`,
+    vInfra: n => `${n} прогон(ов) завершились инфраструктурной ошибкой и исключены из решённости.`,
+    vCiOverlap: "Доверительные интервалы решённости пересекаются — для вывода о разнице качества нужно больше повторов.",
+    vCiClear: (name) => `У «${name}» доверительный интервал решённости не пересекается с остальными — разница в качестве статистически подтверждена.`,
+    expOption: (id, name, n) => `#${id} ${name} (${n} прогонов)`,
+    live: "Онлайн",
+    updated: t => `обновлено ${t}`,
+  },
+};
+let lang = localStorage.getItem("eval-lab-lang") || "en";
+let chart;
+let currentExp = null;
+let lastSig = "";
+const REFRESH_MS = 5000;
+const T = () => I18N[lang];
+const fmt = (x, d=4) => x === null || x === undefined ? "—" : Number(x).toFixed(d);
+const pct = x => x === null || x === undefined ? "—" : (x*100).toFixed(1) + "%";
+
+function setLang(l) {
+  lang = l;
+  localStorage.setItem("eval-lab-lang", l);
+  document.getElementById("btnEn").classList.toggle("active", l === "en");
+  document.getElementById("btnRu").classList.toggle("active", l === "ru");
+  document.getElementById("title").textContent = T().title;
+  document.getElementById("expLabel").textContent = T().experiment;
+  document.getElementById("runsHeading").textContent = T().runsHeading;
+  document.getElementById("traceHeading").textContent = T().traceHeading;
+  document.getElementById("trace").innerHTML = `<i>${T().selectRun}</i>`;
+  stamp();
+  loadExperiments(true);
+}
+
+function stamp() {
+  const locale = lang === "ru" ? "ru-RU" : "en-GB";
+  document.getElementById("liveText").textContent =
+    `${T().live} · ${T().updated(new Date().toLocaleTimeString(locale))}`;
+}
+
+async function loadExperiments(force) {
+  const exps = await (await fetch("/api/experiments")).json();
+  const sel = document.getElementById("expSelect");
+  sel.innerHTML = exps.map(e => `<option value="${e.id}">${T().expOption(e.id, e.name, e.n_runs)}</option>`).join("");
+  sel.onchange = () => loadExperiment(sel.value, true);
+  if (exps.length) {
+    if (currentExp && exps.some(e => e.id === currentExp)) sel.value = currentExp;
+    loadExperiment(sel.value, force);
+  }
+}
+
+async function loadExperiment(id, force) {
+  currentExp = Number(id);
+  const [summary, runs] = await Promise.all([
+    (await fetch(`/api/experiments/${id}/summary`)).json(),
+    (await fetch(`/api/experiments/${id}/runs`)).json(),
+  ]);
+  stamp();
+  const last = runs.length ? runs[runs.length - 1].id : 0;
+  const sig = `${JSON.stringify(summary)}|${runs.length}|${last}`;
+  if (!force && sig === lastSig) return;
+  lastSig = sig;
+  renderVerdict(summary);
+  renderSummary(summary);
+  renderChart(summary);
+  renderRuns(runs);
+}
+
+setInterval(() => { if (!document.hidden) loadExperiments(false); }, REFRESH_MS);
+
+function renderVerdict(s) {
+  const v = document.getElementById("verdict");
+  if (!s.length) { v.innerHTML = `<b>${T().verdictHeading}</b><p>${T().noData}</p>`; return; }
+  const totalRuns = s.reduce((a, c) => a + c.n_runs, 0);
+  const totalSolved = s.reduce((a, c) => a + c.n_solved, 0);
+  const totalInfra = s.reduce((a, c) => a + c.n_infra_errors, 0);
+  const totalCost = s.reduce((a, c) => a + c.cost_total_usd, 0);
+  const lines = [T().vTotal(totalRuns, totalSolved, totalCost.toFixed(4))];
+  const withSolved = s.filter(c => c.cost_per_solved_usd !== null);
+  if (withSolved.length) {
+    const best = withSolved.reduce((a, b) => a.cost_per_solved_usd <= b.cost_per_solved_usd ? a : b);
+    lines.push(T().vBest(best.config_name, fmt(best.cost_per_solved_usd), pct(best.solve_rate)));
+    const others = s.filter(c => c.config_name !== best.config_name && c.solve_rate_ci95);
+    const clear = others.length && others.every(c =>
+      best.solve_rate_ci95 && (best.solve_rate_ci95[0] > c.solve_rate_ci95[1] || best.solve_rate_ci95[1] < c.solve_rate_ci95[0]));
+    lines.push(clear ? T().vCiClear(best.config_name) : T().vCiOverlap);
+  } else {
+    lines.push(T().vNone);
+  }
+  const withCache = s.filter(c => c.cache_hit_rate !== null);
+  if (withCache.length) {
+    const top = withCache.reduce((a, b) => a.cache_hit_rate >= b.cache_hit_rate ? a : b);
+    lines.push(T().vCache(top.config_name, pct(top.cache_hit_rate)));
+  }
+  if (totalInfra) lines.push(T().vInfra(totalInfra));
+  v.innerHTML = `<b>${T().verdictHeading}</b><ul>${lines.map(l => `<li>${l}</li>`).join("")}</ul>`;
+}
+
+function renderSummary(s) {
+  const h = T().th;
+  const rows = s.map(c => `<tr>
+    <td>${c.config_name}</td><td>${c.n_runs}</td><td>${c.n_solved}</td>
+    <td>${pct(c.solve_rate)}</td><td>${fmt(c.cost_per_solved_usd)}</td>
+    <td>${fmt(c.latency_p50_ms,0)}</td><td>${fmt(c.latency_p95_ms,0)}</td>
+    <td>${pct(c.cache_hit_rate)}</td><td>${c.avg_attempts.toFixed(2)}</td>
+    <td class="${c.tool_errors ? "err" : ""}">${c.tool_errors}</td></tr>`).join("");
+  document.getElementById("summary").innerHTML = `<table>
+    <tr><th>${h.config}</th><th>${h.runs}</th><th>${h.solved}</th><th>${h.solveRate}</th><th>${h.costSolved}</th>
+    <th>${h.p50}</th><th>${h.p95}</th><th>${h.cacheHit}</th><th>${h.attempts}</th><th>${h.toolErr}</th></tr>${rows}</table>`;
+}
+
+function renderChart(s) {
+  const ctx = document.getElementById("chart");
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, { type: "bar", data: {
+    labels: s.map(c => c.config_name),
+    datasets: [
+      { label: T().chart.cost, data: s.map(c => c.cost_per_solved_usd) },
+      { label: T().chart.cache, data: s.map(c => c.cache_hit_rate) },
+    ]}, options: { responsive: true } });
+}
+
+function renderRuns(runs) {
+  const h = T().th, st = T().status;
+  const rows = runs.map(r => `<tr>
+    <td><a href="#" onclick="loadTrace(${r.id});return false;">#${r.id}</a></td>
+    <td>${r.config_name}</td><td>${r.task_id}</td><td>${r.repeat_idx}</td>
+    <td class="${r.error ? "err" : (r.solved ? "ok" : "err")}">${r.error ? st.err : (r.solved ? st.solved : st.fail)}</td>
+    <td>${fmt(r.cost_usd)}</td><td>${r.prompt_tokens}</td><td>${r.cache_hit_tokens}</td>
+    <td>${r.attempts}</td></tr>`).join("");
+  document.getElementById("runs").innerHTML = `<table>
+    <tr><th>${h.run}</th><th>${h.config}</th><th>${h.task}</th><th>${h.rep}</th><th>${h.status}</th>
+    <th>${h.cost}</th><th>${h.promptTok}</th><th>${h.cacheTok}</th><th>${h.attempts}</th></tr>${rows}</table>`;
+}
+
+async function loadTrace(id) {
+  const msgs = await (await fetch(`/api/runs/${id}/trace`)).json();
+  document.getElementById("trace").innerHTML = msgs.map(m =>
+    `<div class="trace-msg"><div class="role">${m.role}</div><pre>${m.content.replace(/</g,"&lt;")}</pre></div>`).join("");
+}
+
+setLang(lang);
+</script>
+</body>
+</html>

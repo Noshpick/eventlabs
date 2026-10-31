@@ -1,0 +1,9 @@
+FROM python:3.11-slim
+
+RUN pip install --no-cache-dir pytest==8.* pytest-timeout==2.*
+
+RUN useradd -m sandbox
+USER sandbox
+WORKDIR /work
+
+CMD ["python", "-m", "pytest", "-q"]
